@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "train": "python3 training/train_coswara.py"
+    "train": "python3 training/train_coswara.py",
+    "train:coughsense": "python3 ml_service/train_coughsense.py --use_csv --csv_path ../multi_disease_data/balanced_3class.csv",
+    "ml": "python3 ml_service/coughsense_service.py"
   },
   "dependencies": {
     "@clerk/backend": "^1.0.0",

@@ -63,9 +63,10 @@ mobile/node_modules/
 *.flac
 *.m4a
 
-# Ignore all markdown files except README.md
+# Ignore all markdown files except README.md and RESEARCH.md
 *.md
 !README.md
+!RESEARCH.md
 
 # Datasets
 multi_disease_data/
