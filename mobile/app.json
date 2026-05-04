@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "CoughAI",
+    "slug": "cough-ai",
+    "version": "1.0.0",
+    "sdkVersion": "54.0.0",
+    "scheme": "coughai",
+    "ios": {
+      "supportsTablet": false
+    },
+    "android": {
+      "permissions": [
+        "RECORD_AUDIO"
+      ]
+    },
+    "extra": {
+      "CLERK_PUBLISHABLE_KEY": "pk_test_aW1tb3J0YWwtc3dhbi01OC5jbGVyay5hY2NvdW50cy5kZXYk",
+      "API_URL": "http://172.20.10.4:4000",
+      "DEMO_MODE": "false"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser"
+    ]
+  }
+}

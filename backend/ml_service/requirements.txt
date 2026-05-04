@@ -1,0 +1,7 @@
+flask==3.0.0
+torch==2.1.0
+torchaudio==2.1.0
+librosa==0.10.1
+numpy==1.24.3
+scipy==1.11.4
+soundfile==0.12.1

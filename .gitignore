@@ -1,0 +1,77 @@
+# Exclude Coswara-Data folder
+Coswara-Data/
+
+# Exclude Python virtual environment
+.venv/
+
+# Exclude node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Exclude OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Exclude IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Exclude Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+# # lib/  <-- Commented out to allow src/lib
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Exclude mobile app build files
+mobile/android/app/build/
+mobile/ios/build/
+mobile/node_modules/
+
+# Exclude model files (optional - uncomment if you want to exclude)
+# *.pth
+# *.pkl
+# *.h5
+
+# Exclude large data files
+*.wav
+*.mp3
+*.flac
+*.m4a
+
+# Ignore all markdown files except README.md
+*.md
+!README.md
+
+# Datasets
+multi_disease_data/
+
+# Environments
+venv/
+
+# Package locks
+package-lock.json
