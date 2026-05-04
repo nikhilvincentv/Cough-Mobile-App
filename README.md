@@ -1,85 +1,66 @@
-# 🏥 Cough AI - Respiratory Disease Detection
+# Cough AI - Respiratory Disease Detection
 
-AI-powered respiratory disease detection from cough sounds using deep learning.
+This project uses deep learning to detect respiratory diseases from audio recordings of coughs. It is currently a proof-of-concept with a balanced accuracy of 64.4% across all classes.
 
-**Model Accuracy:** 64.4% (Balanced across all classes)
-**Status:** ✅ Production-ready proof-of-concept
+## What it does
 
-## 🎯 What It Does
+The system analyzes cough audio to detect three possible states:
+* Healthy (59.9% accuracy)
+* COVID-19 (64.2% accuracy)
+* Bronchitis (67.1% accuracy)
 
-Detects **3 respiratory diseases** from cough audio:
-- ✅ **Healthy** (59.9% accuracy)
-- ✅ **COVID-19** (64.2% accuracy)
-- ✅ **Bronchitis** (67.1% accuracy)
+Overall, the model averages 64.4% accuracy across these three categories.
 
-**Overall Accuracy: 64.4%** (Balanced across all classes)
+## Quick start
 
-## 🚀 Quick Start (3 Terminals)
+You will need three terminals to run the different parts of the system.
 
+Terminal 1: ML Service
 ```bash
-# Terminal 1: ML Service
 cd backend/ml_service
 source ../../.venv/bin/activate
 python app.py
+```
 
-# Terminal 2: Backend API
+Terminal 2: Backend API
+```bash
 cd backend
 npm start
+```
 
-# Terminal 3: Mobile App
+Terminal 3: Mobile App
+```bash
 cd mobile
 npx expo start
 ```
 
-**See [RUN_SYSTEM.md](./RUN_SYSTEM.md) for detailed instructions**
+For more detailed setup instructions, check out RUN_SYSTEM.md.
 
-## 📱 Features
+## Features
 
-- **Audio Recording**: Record cough samples with high-quality audio
-- **AI Analysis**: Analyze cough patterns using ML models
-- **Real-time Results**: Get instant probability predictions
-- **Secure Authentication**: Clerk-based user authentication
-- **Rate Limiting**: Upstash Redis for API protection
-- **Demo Mode**: Test without backend configuration
+* Audio recording: Capture high-quality cough samples directly from the app.
+* ML analysis: Process audio files using our trained model to find patterns.
+* Instant results: Receive probability predictions in real time.
+* Secure authentication: User accounts are managed securely using Clerk.
+* Rate limiting: API endpoints are protected using Upstash Redis.
+* Demo mode: You can test the frontend without having to set up the backend.
 
-## 🏗️ Architecture
+## System architecture
 
-```
-┌─────────────────┐
-│   Mobile App    │
-│  (React Native) │
-│   + Expo        │
-└────────┬────────┘
-         │ HTTPS + JWT
-         ▼
-┌─────────────────┐
-│  Backend API    │
-│   (Express.js)  │
-├─────────────────┤
-│ • Clerk Auth    │
-│ • Rate Limiting │
-│ • OpenAI        │
-│ • ML Models     │
-└─────────────────┘
-```
+The project consists of a React Native (Expo) mobile app that communicates over HTTPS/JWT with an Express.js backend. The backend handles authentication via Clerk, rate limiting via Redis, and passes audio data to our ML models and OpenAI for analysis.
 
-## 📚 Documentation
+## Documentation
 
-### 🎯 Essential Guides
-- **[RUN_SYSTEM.md](./RUN_SYSTEM.md)** - ⭐ How to run the complete system
-- **[ML_TRAINING_COMPLETE_JOURNEY.md](./ML_TRAINING_COMPLETE_JOURNEY.md)** - Complete ML training story (10 attempts)
-- **[FINAL_RESULTS.md](./FINAL_RESULTS.md)** - Model performance and analysis
-- **[COMPLETE_PROJECT_DOCUMENTATION.md](./COMPLETE_PROJECT_DOCUMENTATION.md)** - Technical documentation
+* RUN_SYSTEM.md: Instructions for getting the whole system up and running.
+* ML_TRAINING_COMPLETE_JOURNEY.md: The full story of how we trained the model over 10 different iterations.
+* FINAL_RESULTS.md: Detailed model performance metrics.
+* COMPLETE_PROJECT_DOCUMENTATION.md: Full technical documentation.
 
-## 🔧 Configuration
+## Configuration
 
-### Demo Mode (Default)
-Works out of the box, no configuration needed.
+By default, the app runs in demo mode, which requires no extra setup. If you want to run it in production mode, you need to set up some environment variables.
 
-### Production Mode
-Set these environment variables:
-
-**Backend** (`backend/.env`):
+Backend (`backend/.env`):
 ```env
 CLERK_SECRET_KEY=sk_test_...
 UPSTASH_REDIS_REST_URL=https://...
@@ -88,7 +69,7 @@ OPENAI_API_KEY=sk-proj-...
 PORT=4000
 ```
 
-**Mobile** (`mobile/app.json`):
+Mobile (`mobile/app.json`):
 ```json
 {
   "expo": {
@@ -101,62 +82,30 @@ PORT=4000
 }
 ```
 
-## 🛠️ Tech Stack
+## Tech stack
 
-### Mobile
-- React Native + Expo
-- Clerk (Authentication)
-- Expo AV (Audio Recording)
-- Axios (HTTP Client)
+* Mobile: React Native, Expo, Clerk, Expo AV, Axios.
+* Backend: Express.js, Clerk, Upstash Redis, OpenAI Whisper API, Multer.
+* ML: YAMNet Transfer Learning (via Google AudioSet), TensorFlow/Keras, Coswara Dataset, CoughVID Dataset.
 
-### Backend
-- Express.js
-- Clerk Backend (JWT Verification)
-- Upstash Redis (Rate Limiting)
-- OpenAI (Whisper API)
-- Multer (File Uploads)
+## API endpoints
 
-### ML/AI
-- YAMNet Transfer Learning (Google AudioSet)
-- TensorFlow/Keras (64.4% accuracy)
-- Coswara Dataset (Healthy, COVID)
-- CoughVID Dataset (Bronchitis)
+GET /health
+Returns the health status of the API.
 
-## 📊 API Endpoints
+POST /api/analyze
+Analyzes a cough audio sample.
+* Requires a Bearer token.
+* Rate limited to 20 requests per minute per IP.
+* Expects multipart/form-data with an "audio" field.
+* Returns probability predictions.
 
-### `GET /health`
-Health check endpoint
+## Testing
 
-### `POST /api/analyze`
-Analyze cough audio sample
-- **Auth**: Bearer token required
-- **Rate Limit**: 20 req/min per IP
-- **Body**: `multipart/form-data` with `audio` field
-- **Response**: Probability predictions
-
-## 🔐 Security
-
-- JWT token verification via Clerk
-- Rate limiting via Upstash Redis
-- Secure token storage in mobile app
-- Environment variable protection
-
-## 🎯 Recent Fixes
-
-✅ Rate limiter lazy initialization  
-✅ Proper JWT verification  
-✅ API endpoint alignment  
-✅ Demo mode implementation  
-✅ Environment file cleanup  
-✅ Enhanced error handling  
-✅ Graceful service degradation  
-
-See [CHANGES.md](./CHANGES.md) for details.
-
-## 🧪 Testing
+You can test the backend using curl:
 
 ```bash
-# Backend health check
+# Health check
 curl http://localhost:4000/health
 
 # Test analyze endpoint (requires auth)
@@ -165,16 +114,11 @@ curl -X POST http://localhost:4000/api/analyze \
   -F "audio=@sample.wav"
 ```
 
-## 📱 Mobile Testing
+To test the mobile app, start Expo with `npx expo start`, then press `i` for the iOS simulator, `a` for Android, or scan the QR code with your physical device.
 
-1. Start Expo: `npx expo start`
-2. Press `i` for iOS simulator
-3. Press `a` for Android emulator
-4. Scan QR code for physical device
+## Troubleshooting
 
-## 🐛 Troubleshooting
-
-**Backend won't start?**
+If the backend won't start, try doing a fresh install of the node modules:
 ```bash
 cd backend
 rm -rf node_modules
@@ -182,77 +126,20 @@ npm install
 npm run dev
 ```
 
-**Mobile shows network error?**
-- Enable demo mode: Set `DEMO_MODE: "true"` in `app.json`
-- Or check backend is running: `curl http://localhost:4000/health`
+If the mobile app shows a network error, make sure the backend is actually running by checking `http://localhost:4000/health`. Alternatively, you can enable demo mode by setting `DEMO_MODE: "true"` in your app.json.
 
-**Audio recording fails?**
-- Grant microphone permissions
-- Use real device (simulator has limited audio support)
+If audio recording is failing, make sure you granted microphone permissions. It is highly recommended to use a physical device for this, as simulators can have issues with audio.
 
-## 🚢 Deployment
+## Deployment
 
-### Backend
-Deploy to Railway, Render, or Vercel:
-```bash
-cd backend
-# Set environment variables in platform
-# Deploy via Git or CLI
-```
-
-### Mobile
-Build with Expo Application Services:
+Backend: The Express app can be deployed to Railway, Render, or Vercel. Make sure to set up your environment variables on the platform.
+Mobile: You can build the app using Expo Application Services (EAS):
 ```bash
 cd mobile
 eas build --platform ios
 eas build --platform android
 ```
 
-## 📈 Project Status
+## Acknowledgments
 
-- [x] Audio recording (React Native + Expo)
-- [x] ML model training (10 iterations, 64.4% accuracy)
-- [x] YAMNet transfer learning
-- [x] Targeted data augmentation
-- [x] Backend API (Express.js)
-- [x] Authentication (Clerk)
-- [x] Rate limiting (Upstash Redis)
-- [x] Complete documentation
-- [ ] Model deployment to production
-- [ ] Analysis history
-- [ ] Export reports
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add amazing feature'`
-4. Push to branch: `git push origin feature/amazing-feature`
-5. Open Pull Request
-
-## 📄 License
-
-MIT License - see LICENSE file for details
-
-## 🙏 Acknowledgments
-
-- **Coswara Dataset** (IISc Bangalore) - Healthy, COVID, Asthma, COPD samples
-- **CoughVID Dataset** (Kaggle) - Bronchitis samples
-- Clerk for authentication
-- Upstash for Redis hosting
-- Expo team for mobile framework
-
-## 📞 Support
-
-- 📖 Read [RUN_SYSTEM.md](./RUN_SYSTEM.md) for setup
-- 📚 Check [ML_TRAINING_COMPLETE_JOURNEY.md](./ML_TRAINING_COMPLETE_JOURNEY.md) for ML details
-- 🐛 Open an issue for bugs
-- 💬 Discussions for questions
-
----
-
-**Built with ❤️ for healthcare innovation**
-
-**Status**: ✅ Production-Ready Proof-of-Concept  
-**Model**: YAMNet + Targeted Augmentation (64.4%)  
-**Last Updated**: 2025-10-15
+We used the Coswara Dataset from IISc Bangalore for healthy, COVID, Asthma, and COPD samples. The Bronchitis samples came from the CoughVID Dataset on Kaggle. We also rely on Clerk for authentication and Upstash for Redis.
