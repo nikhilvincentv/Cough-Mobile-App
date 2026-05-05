@@ -51,12 +51,15 @@ from coughsense_model import (
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-SAMPLE_RATE  = 16000
-CLIP_SAMPLES = int(SAMPLE_RATE * 3.5)
-CLASS_NAMES  = ['healthy', 'covid', 'bronchitis']
-CLASS_MAP    = {c: i for i, c in enumerate(CLASS_NAMES)}
-DOMAIN_MAP   = {'coswara': 0, 'coughvid': 1, 'unknown': 0}
-AUG_MULT     = {'healthy': 2, 'covid': 6, 'bronchitis': 2}
+SAMPLE_RATE       = 16000
+CLIP_SAMPLES      = int(SAMPLE_RATE * 3.5)
+ALL_CLASS_NAMES   = ['healthy', 'covid', 'bronchitis']  # canonical order
+DOMAIN_MAP        = {'coswara': 0, 'coughvid': 1, 'unknown': 0}
+AUG_MULT          = {'healthy': 2, 'covid': 6, 'bronchitis': 2}
+
+# These are set dynamically in train() after loading samples
+CLASS_NAMES: list = ALL_CLASS_NAMES
+CLASS_MAP:   dict = {c: i for i, c in enumerate(CLASS_NAMES)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,8 +142,13 @@ class CoughDataset(Dataset):
         try:
             w, sr = torchaudio.load(path)
         except Exception:
-            y, sr = librosa.load(path, sr=None, mono=True)
-            w = torch.tensor(y).unsqueeze(0)
+            try:
+                y, sr = librosa.load(path, sr=None, mono=True)
+                w = torch.tensor(y).unsqueeze(0)
+            except Exception:
+                return torch.zeros(1, CLIP_SAMPLES)
+        if w.numel() == 0 or w.shape[-1] == 0:
+            return torch.zeros(1, CLIP_SAMPLES)
         if sr != SAMPLE_RATE:
             w = torchaudio.functional.resample(w, sr, SAMPLE_RATE)
         if w.shape[0] > 1:
@@ -161,13 +169,17 @@ class CoughDataset(Dataset):
             w = AudioAugmentor.apply(w, n=2)
         return dict(waveform=w, label=CLASS_MAP[s['label']],
                     domain=DOMAIN_MAP.get(s.get('domain', 'unknown'), 0),
+                    age_group=s.get('age_group', -1),
+                    gender=s.get('gender', -1),
                     path=s['path'])
 
 
 def collate_fn(batch):
-    return (torch.stack([b['waveform'] for b in batch]),
-            torch.tensor([b['label']   for b in batch], dtype=torch.long),
-            torch.tensor([b['domain']  for b in batch], dtype=torch.long))
+    return (torch.stack([b['waveform']  for b in batch]),
+            torch.tensor([b['label']    for b in batch], dtype=torch.long),
+            torch.tensor([b['domain']   for b in batch], dtype=torch.long),
+            torch.tensor([b['age_group']for b in batch], dtype=torch.long),
+            torch.tensor([b['gender']   for b in batch], dtype=torch.long))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,6 +246,59 @@ class CurriculumSampler:
 # Data Discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _age_to_group(age):
+    """Map integer age to age-group index (0–3), or -1 if unknown."""
+    try:
+        a = int(float(age))
+        if a <= 20:  return 0
+        if a <= 40:  return 1
+        if a <= 60:  return 2
+        return 3
+    except Exception:
+        return -1
+
+
+def _gender_to_idx(g):
+    """Map gender string to 0/1, or -1 if unknown."""
+    if isinstance(g, str):
+        g = g.strip().lower()
+        if g in ('male', 'm'):   return 0
+        if g in ('female', 'f'): return 1
+    return -1
+
+
+def _load_coswara_demographics(coswara_data_dir=None):
+    """Return dict: patient_id → {age_group, gender}."""
+    candidates = []
+    if coswara_data_dir:
+        candidates.append(Path(coswara_data_dir) / 'combined_data.csv')
+    # Also try standard locations relative to this file
+    candidates += [
+        Path.home() / 'Downloads/TRANSFER/cough-ai-expo/Coswara-Data/combined_data.csv',
+        Path(__file__).parent / 'combined_data.csv',
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                import pandas as pd
+                df = pd.read_csv(p)
+                demo = {}
+                for _, row in df.iterrows():
+                    pid = str(row.get('id', '')).strip()
+                    if not pid:
+                        continue
+                    demo[pid] = {
+                        'age_group': _age_to_group(row.get('a', -1)),
+                        'gender':    _gender_to_idx(row.get('g', '')),
+                    }
+                print(f"[Demo] Loaded {len(demo)} Coswara demographic records from {p}")
+                return demo
+            except Exception as e:
+                print(f"[Demo] Failed to load {p}: {e}")
+    print("[Demo] No Coswara demographic metadata found — age/gender will be -1")
+    return {}
+
+
 def load_from_csv(csv_path):
     import csv
     samples = []
@@ -241,6 +306,10 @@ def load_from_csv(csv_path):
     if not p.exists():
         print(f"[ERROR] CSV not found: {csv_path}")
         return samples
+
+    # Try to load demographic metadata from Coswara
+    demo_map = _load_coswara_demographics()
+
     with open(p) as f:
         for row in csv.DictReader(f):
             label = row.get('disease', '').lower().strip()
@@ -252,9 +321,19 @@ def load_from_csv(csv_path):
             if label is None:
                 continue
             fp = Path(path) if Path(path).is_absolute() else (p.parent / path).resolve()
-            if fp.exists():
-                samples.append({'path': str(fp), 'label': label, 'domain': src})
+            if not fp.exists():
+                continue
+            # Extract patient ID from filename: {pid}_cough-heavy.wav
+            fname = fp.stem   # e.g. "iV3Db6t1T8b7c5HQY2TwxIhjbzD3_cough-heavy"
+            pid   = fname.rsplit('_', 1)[0] if '_' in fname else fname
+            demo  = demo_map.get(pid, {'age_group': -1, 'gender': -1})
+            samples.append({
+                'path': str(fp), 'label': label, 'domain': src,
+                'age_group': demo['age_group'], 'gender': demo['gender'],
+            })
     print(f"[CSV] {len(samples)} samples: {dict(Counter(s['label'] for s in samples))}")
+    n_with_demo = sum(1 for s in samples if s['age_group'] >= 0)
+    print(f"[CSV] {n_with_demo}/{len(samples)} samples have demographic labels")
     return samples
 
 
@@ -340,80 +419,80 @@ def train_epoch(model, loader, pcgrad, criterion, device, epoch,
     model.train()
     total_loss = 0.0
     all_preds, all_labels = [], []
-    lambda_d = get_lambda_schedule(epoch, total_epochs)
+    lambda_d    = get_lambda_schedule(epoch, total_epochs)
+    lambda_demo = get_lambda_schedule(epoch, total_epochs)   # same schedule
 
-    for batch_idx, (waveform, labels, domains) in enumerate(
+    for batch_idx, (waveform, labels, domains, age_groups, genders) in enumerate(
             tqdm(loader, desc=f'Train {epoch}/{total_epochs}', leave=False)):
-        waveform = waveform.to(device)
-        labels   = labels.to(device)
-        domains  = domains.to(device)
+        waveform   = waveform.to(device)
+        labels     = labels.to(device)
+        domains    = domains.to(device)
+        age_groups = age_groups.to(device)
+        genders    = genders.to(device)
 
         # ── EMA teacher soft targets ──────────────────────────────────
         with torch.no_grad():
             teacher_probs = ema_teacher.predict(waveform)
 
-        # ── Forward ───────────────────────────────────────────────────
-        out = model(waveform, lambda_d=lambda_d)
+        # ── Forward (V3 — lambda_demo added) ──────────────────────────
+        out = model(waveform, lambda_d=lambda_d, lambda_demo=lambda_demo)
 
         # ── Manifold MixUp (embedding space) ─────────────────────────
-        if use_mixup and random.random() < 0.5:
+        # Skip when phase encoder is active: disease_head input dim
+        # changed (256+192=448), so the shortcut path is incompatible.
+        _can_mixup = use_mixup and not model.use_phase_encoder
+        if _can_mixup and random.random() < 0.5:
             emb_mix, y_soft, d_soft, lam = manifold_mixup(
                 out['embeddings'], labels, domains)
-            # Re-compute logits from mixed embeddings using disease head only
-            logits_mix = model.disease_head(model.fusion.proj(emb_mix))
+            logits_mix = model.disease_head(emb_mix)   # 256-dim only
             dom_mix    = model.domain_clf(emb_mix, lambda_d)
-            # Soft cross-entropy for mixed samples
             l_focal  = -(y_soft * F.log_softmax(logits_mix, dim=1)).sum(dim=1).mean()
             l_domain = -(d_soft * F.log_softmax(dom_mix, dim=1)).sum(dim=1).mean()
-            # Contrastive loss still on original (hard labels)
             l_supcon = criterion.supcon(out['embeddings'], labels)
-            # Distillation: compare student to teacher on original
             l_distill = F.kl_div(F.log_softmax(out['logits'], dim=1),
                                   teacher_probs, reduction='batchmean')
+            l_demo   = criterion.demographic_loss(out, age_groups, genders)
         else:
-            losses_dict = criterion(out, labels, domains,
-                                    lambda_d=lambda_d, teacher_probs=teacher_probs)
             l_focal   = criterion.focal(out['logits'], labels)
             l_domain  = criterion.domain_loss(out['domain_logits'], domains)
             l_supcon  = criterion.supcon(out['embeddings'], labels)
-            l_distill = losses_dict['distill']
-            l_distill = torch.tensor(l_distill, device=device) if not isinstance(l_distill, torch.Tensor) else l_distill
+            l_demo    = criterion.demographic_loss(out, age_groups, genders)
+            l_distill = torch.tensor(0.0, device=device)
+            if teacher_probs is not None:
+                l_distill = F.kl_div(F.log_softmax(out['logits'], dim=1),
+                                     teacher_probs, reduction='batchmean')
 
-        # ── GradNorm dynamic weighting ────────────────────────────────
+        # ── GradNorm dynamic weighting (4 tasks in V3) ────────────────
         if gradnorm is not None and batch_idx % 10 == 0:
             shared_param = next(iter(model.fusion.parameters()))
             try:
-                gradnorm.update([l_focal, l_supcon, l_domain],
-                                 shared_param, gradnorm_opt)
+                gradnorm.update([l_focal, l_supcon, l_domain, l_demo],
+                                shared_param, gradnorm_opt)
                 gn_w = gradnorm.get_weights()
             except Exception:
-                gn_w = torch.ones(3, device=device)
+                gn_w = torch.ones(4, device=device)
         else:
             gn_w = (gradnorm.get_weights() if gradnorm is not None
-                    else torch.ones(3, device=device))
+                    else torch.ones(4, device=device))
 
         l_cls_w    = gn_w[0] * l_focal
         l_supcon_w = gn_w[1] * l_supcon
         l_domain_w = gn_w[2] * l_domain
+        l_demo_w   = gn_w[3] * l_demo if gn_w.numel() > 3 else l_demo
 
         # ── PCGrad or standard backward ──────────────────────────────
+        # PCGrad: include ALL conflicting objectives so the graph is
+        # consumed in a single backward pass (fixes retain_graph error).
         if use_pcgrad and isinstance(pcgrad, PCGrad):
-            full_loss = l_cls_w + criterion.alpha * l_supcon_w + criterion.beta * l_distill
-            pcgrad.pc_backward([l_cls_w, l_domain_w])
-            # Add supcon and distill gradient on top of surgery result
-            # (non-conflicting losses don't need surgery)
-            sup_grad = torch.autograd.grad(
-                criterion.alpha * l_supcon_w + criterion.beta * l_distill,
-                [p for p in model.parameters() if p.requires_grad],
-                retain_graph=False, allow_unused=True)
-            with torch.no_grad():
-                for p, g in zip(model.parameters(), sup_grad):
-                    if g is not None and p.grad is not None:
-                        p.grad.data.add_(g.data)
-            total_loss_val = float(full_loss.detach())
+            auxiliary = criterion.alpha * l_supcon_w + criterion.beta * l_distill
+            pcgrad.pc_backward([l_cls_w, l_domain_w, l_demo_w, auxiliary])
+            total_loss_val = float((l_cls_w + auxiliary - lambda_d * l_domain_w
+                                    - lambda_demo * l_demo_w).detach())
         else:
-            total_loss_tensor = (l_cls_w + criterion.alpha * l_supcon_w
-                                 - lambda_d * l_domain_w
+            total_loss_tensor = (l_cls_w
+                                 + criterion.alpha * l_supcon_w
+                                 - lambda_d   * l_domain_w
+                                 - lambda_demo * l_demo_w
                                  + criterion.beta * l_distill)
             pcgrad.zero_grad()
             total_loss_tensor.backward()
@@ -422,11 +501,9 @@ def train_epoch(model, loader, pcgrad, criterion, device, epoch,
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         pcgrad.step()
 
-        # ── Memory bank update ────────────────────────────────────────
+        # ── Memory bank + EMA updates ─────────────────────────────────
         with torch.no_grad():
             model.memory_bank.update(out['embeddings'].detach(), labels)
-
-        # ── EMA teacher update ────────────────────────────────────────
         ema_teacher.update(model)
 
         total_loss += total_loss_val
@@ -443,20 +520,23 @@ def eval_epoch(model, loader, criterion, device):
     model.eval()
     total_loss = 0.0
     all_preds, all_labels, all_probs = [], [], []
+    all_age_groups, all_genders = [], []
 
-    for waveform, labels, domains in tqdm(loader, desc='Eval', leave=False):
+    for waveform, labels, domains, age_groups, genders in tqdm(loader, desc='Eval', leave=False):
         waveform = waveform.to(device)
         labels   = labels.to(device)
         domains  = domains.to(device)
 
-        out    = model(waveform, lambda_d=0.0)
-        losses = criterion(out, labels, domains, lambda_d=0.0)
+        out    = model(waveform, lambda_d=0.0, lambda_demo=0.0)
+        losses = criterion(out, labels, domains, lambda_d=0.0, lambda_demo=0.0)
         total_loss += losses['total'].item()
 
         probs = F.softmax(out['logits'], dim=1).cpu().numpy()
         all_probs.extend(probs)
         all_preds.extend(probs.argmax(1))
         all_labels.extend(labels.cpu().numpy())
+        all_age_groups.extend(age_groups.numpy())
+        all_genders.extend(genders.numpy())
 
     all_probs  = np.array(all_probs)
     all_labels = np.array(all_labels)
@@ -472,12 +552,32 @@ def eval_epoch(model, loader, criterion, device):
         per_class[n] = float(accuracy_score(all_labels[m], all_preds[m])) if m.sum() > 0 else 0.0
 
     try:
-        auc = float(roc_auc_score(all_labels, all_probs, multi_class='ovr', average='macro'))
+        if len(CLASS_NAMES) == 2:
+            auc = float(roc_auc_score(all_labels, all_probs[:, 1]))
+        else:
+            auc = float(roc_auc_score(all_labels, all_probs, multi_class='ovr', average='macro'))
     except Exception:
         auc = 0.0
 
+    # ── Demographic-stratified accuracy ─────────────────────────────
+    all_age_groups = np.array(all_age_groups)
+    all_genders    = np.array(all_genders)
+    AGE_NAMES   = ['<21', '21-40', '41-60', '60+']
+    GENDER_NAMES= ['male', 'female']
+
+    age_acc, gender_acc = {}, {}
+    for gi, gname in enumerate(AGE_NAMES):
+        m = all_age_groups == gi
+        if m.sum() > 0:
+            age_acc[gname] = float(accuracy_score(all_labels[m], all_preds[m]))
+    for gi, gname in enumerate(GENDER_NAMES):
+        m = all_genders == gi
+        if m.sum() > 0:
+            gender_acc[gname] = float(accuracy_score(all_labels[m], all_preds[m]))
+
     return dict(loss=total_loss/len(loader), accuracy=acc, f1_macro=f1,
-                auc=auc, per_class_acc=per_class, confusion=cm.tolist())
+                auc=auc, per_class_acc=per_class, confusion=cm.tolist(),
+                age_acc=age_acc, gender_acc=gender_acc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -509,6 +609,23 @@ def train(args):
     dc = Counter(s.get('domain', '?') for s in all_samples)
     print(f"\nDataset: {dict(lc)} | Domains: {dict(dc)} | Total: {len(all_samples)}\n")
 
+    # Build class list dynamically — preserve canonical order, keep only present classes
+    global CLASS_NAMES, CLASS_MAP
+    present = set(lc.keys())
+    CLASS_NAMES = [c for c in ALL_CLASS_NAMES if c in present]
+    if len(CLASS_NAMES) < len(present):
+        # Any class not in canonical list gets appended
+        CLASS_NAMES += sorted(present - set(CLASS_NAMES))
+    CLASS_MAP = {c: i for i, c in enumerate(CLASS_NAMES)}
+    print(f"Active classes ({len(CLASS_NAMES)}): {CLASS_NAMES}")
+
+    # Reduce folds when dataset is small (need at least 2 samples per class per fold)
+    min_class_count = min(lc.values())
+    safe_folds = min(args.folds, max(2, min_class_count // 2))
+    if safe_folds != args.folds:
+        print(f"[INFO] Reduced folds {args.folds}→{safe_folds} (smallest class has {min_class_count} samples)")
+        args.folds = safe_folds
+
     labels_arr  = np.array([s['label'] for s in all_samples])
     skf         = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=args.seed)
     fold_results = []
@@ -530,15 +647,19 @@ def train(args):
         weights  = [1.0 / cc[l] for l in tr_lbl]
         sampler  = WeightedRandomSampler(weights, len(weights), replacement=True)
 
+        # num_workers=0 avoids multiprocessing issues on macOS; pin_memory only for CUDA
+        _nw = 0 if sys.platform == 'darwin' else 2
+        _pm = device.type == 'cuda'
         tr_loader  = DataLoader(tr_ds,  batch_size=args.batch_size,
-                                sampler=sampler, num_workers=2,
-                                collate_fn=collate_fn, pin_memory=True)
+                                sampler=sampler, num_workers=_nw,
+                                collate_fn=collate_fn, pin_memory=_pm)
         val_loader = DataLoader(val_ds, batch_size=args.batch_size,
-                                shuffle=False, num_workers=2,
-                                collate_fn=collate_fn, pin_memory=True)
+                                shuffle=False, num_workers=_nw,
+                                collate_fn=collate_fn, pin_memory=_pm)
 
         # ── Model & optimizers ─────────────────────────────────────
-        model     = build_model(bank_size=args.bank_size).to(device)
+        model     = build_model(num_classes=len(CLASS_NAMES), bank_size=args.bank_size,
+                               use_phase_encoder=args.use_phase_encoder).to(device)
         if fold == 0:
             count_parameters(model)
 
@@ -551,10 +672,10 @@ def train(args):
                                     focal_gamma=2.0, label_smoothing=0.1)
         ema_teacher = EMATeacher(model, alpha=args.ema_alpha)
 
-        # GradNorm
+        # GradNorm — V3 has 4 tasks: focal, supcon, domain, demo
         gradnorm, gradnorm_opt = None, None
         if args.use_gradnorm:
-            gradnorm = GradNorm(n_tasks=3, alpha_gn=1.5).to(device)
+            gradnorm = GradNorm(n_tasks=4, alpha_gn=1.5).to(device)
             gradnorm_opt = torch.optim.Adam(gradnorm.parameters(), lr=1e-3)
 
         # Curriculum
@@ -580,8 +701,12 @@ def train(args):
             print(f"Ep {epoch:3d} | loss={tr_loss:.3f} acc={tr_acc:.3f} f1={tr_f1:.3f} | "
                   f"val_acc={val_m['accuracy']:.3f} f1={val_m['f1_macro']:.3f} "
                   f"auc={val_m['auc']:.3f} λ_d={lam:.3f}")
-            for cls, acc in val_m['per_class_acc'].items():
-                print(f"       {cls:12s}: {acc:.3f}")
+            for cls, acc_v in val_m['per_class_acc'].items():
+                print(f"       {cls:12s}: {acc_v:.3f}")
+            if val_m.get('age_acc'):
+                print("       [age]  " + " ".join(f"{k}:{v:.2f}" for k, v in val_m['age_acc'].items()))
+            if val_m.get('gender_acc'):
+                print("       [gender]" + " ".join(f"{k}:{v:.2f}" for k, v in val_m['gender_acc'].items()))
 
             if val_m['f1_macro'] > best_f1:
                 best_f1    = val_m['f1_macro']
@@ -597,11 +722,11 @@ def train(args):
         # Fit temperature calibration on val logits
         with torch.no_grad():
             all_logits, all_labels_t = [], []
-            for wave, labs, doms in val_loader:
-                out = model(wave.to(device), lambda_d=0.0)
+            for wave, labs, doms, ag, gen in val_loader:
+                out = model(wave.to(device), lambda_d=0.0, lambda_demo=0.0)
                 all_logits.append(out['logits'].cpu())
                 all_labels_t.append(labs)
-            all_logits  = torch.cat(all_logits)
+            all_logits   = torch.cat(all_logits)
             all_labels_t = torch.cat(all_labels_t)
         model.calibrator.calibrate(all_logits, all_labels_t)
 
@@ -655,17 +780,19 @@ def parse_args():
     p.add_argument('--bank_size',      type=int,   default=256)
     p.add_argument('--ema_alpha',      type=float, default=0.999)
     # Innovation flags
-    p.add_argument('--use_pcgrad',     action='store_true', default=True)
-    p.add_argument('--no_pcgrad',      dest='use_pcgrad',   action='store_false')
-    p.add_argument('--use_gradnorm',   action='store_true', default=True)
-    p.add_argument('--no_gradnorm',    dest='use_gradnorm', action='store_false')
-    p.add_argument('--use_curriculum', action='store_true', default=True)
-    p.add_argument('--no_curriculum',  dest='use_curriculum', action='store_false')
-    p.add_argument('--use_mixup',      action='store_true', default=True)
-    p.add_argument('--no_mixup',       dest='use_mixup',    action='store_false')
+    p.add_argument('--use_pcgrad',          action='store_true', default=True)
+    p.add_argument('--no_pcgrad',           dest='use_pcgrad',         action='store_false')
+    p.add_argument('--use_gradnorm',        action='store_true', default=True)
+    p.add_argument('--no_gradnorm',         dest='use_gradnorm',       action='store_false')
+    p.add_argument('--use_curriculum',      action='store_true', default=True)
+    p.add_argument('--no_curriculum',       dest='use_curriculum',     action='store_false')
+    p.add_argument('--use_mixup',           action='store_true', default=True)
+    p.add_argument('--no_mixup',            dest='use_mixup',          action='store_false')
+    p.add_argument('--use_phase_encoder',   action='store_true', default=True)
+    p.add_argument('--no_phase_encoder',    dest='use_phase_encoder',  action='store_false')
     # Data
     p.add_argument('--use_csv',  action='store_true')
-    p.add_argument('--csv_path', default='../../multi_disease_data/balanced_3class.csv')
+    p.add_argument('--csv_path', default='ml_service/local_data.csv')
     return p.parse_args()
 
 

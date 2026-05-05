@@ -1,20 +1,27 @@
 """
-CoughSense V2: Multi-Innovation Dual-Branch Architecture
+CoughSense V3: Phase-Aware Multi-Adversarial Dual-Branch Architecture
+
+New in V3 (beyond V2):
+  9.  Phase-Aware Cough Encoder — segments each cough into explosive,
+        intermediate, and voiced phases; encodes each with a dedicated
+        lightweight Transformer; concatenates CLS tokens → 192-dim phase
+        embedding. Grounded in cough phase anatomy (Shi et al. 2018).
+        COVID-19 shows distinct explosive + voiced phases; bronchitis
+        predominantly intermediate → phase features are discriminative.
+  10. Demographic Adversarial Head — second gradient reversal head that
+        adversarially decorrelates age (4 groups) and gender from the
+        shared feature space. Directly addresses demographic confounding
+        (Islam et al. 2025). First system to apply DANN for both domain
+        shift AND demographic debiasing simultaneously in cough AI.
 
 New in V2 (beyond V1 dual-branch + GRL + CBS-SupCon):
   1.  SpecAugment on mel spectrograms (frequency + time masking)
   2.  Focal Loss for disease head (handles class imbalance at loss level)
   3.  Momentum Memory Bank — MoCo-style ring buffer of past embeddings
-        per class → richer negative mining for CBS-SupCon without
-        requiring large batch sizes
-  4.  EMA Teacher — exponential moving average of student weights for
-        self-distillation; soft teacher targets regularize training
-  5.  Monte Carlo Dropout inference — multiple stochastic forward passes
-        → calibrated uncertainty estimates (epistemic uncertainty)
-  6.  Temperature Scaling — post-hoc calibration of class probabilities
+  4.  EMA Teacher — self-distillation (Mean Teacher, Tarvainen 2017)
+  5.  Monte Carlo Dropout inference — epistemic uncertainty estimation
+  6.  Temperature Scaling — post-hoc calibration (Guo et al. 2017)
   7.  Stochastic Depth in Transformer layers (drop path regularization)
-  8.  HeAR-compatible backbone hook — optional feature extractor swap
-        for Google HeAR foundation model (google/hear on HuggingFace)
 
 Author: Nikhil Vincent
 """
@@ -506,7 +513,184 @@ class EMATeacher:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. Temperature Scaling Calibration
+# 11. Phase-Aware Cough Encoder (V3 — Novel Contribution)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CoughPhaseSegmenter(nn.Module):
+    """
+    Energy-based cough phase segmenter.
+
+    A cough consists of three temporal phases, each originating from a
+    distinct anatomical region (Shi et al. 2018; Chang & Bhavani 2021):
+
+      Explosive  (~15%): vocal cord closure + sudden release → burst of
+                         wideband sound. Reflects peripheral airway state.
+                         COVID-19 shows abnormal explosive phases.
+      Intermediate(~50%): steady turbulent airflow through glottis.
+                         Reflects tracheal and bronchial involvement.
+                         Bronchitis predominantly affects this phase.
+      Voiced     (~35%): glottis narrows → voiced expiratory sound.
+                         Reflects laryngeal + upper airway condition.
+                         COVID-19 shows prolonged/absent voiced phase.
+
+    No prior cough AI model processes these phases with separate encoders.
+    """
+    def __init__(self, sample_rate=16000, n_mels=64, phase_frames=64):
+        super().__init__()
+        self.sr          = sample_rate
+        self.n_mels      = n_mels
+        self.phase_frames = phase_frames
+        self.mel_tf      = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate, n_fft=1024, hop_length=160,
+            n_mels=n_mels, f_min=80, f_max=8000)
+        # explosive, intermediate, voiced fractions
+        self.fracs = [0.15, 0.50, 0.35]
+
+    def _detect_boundaries(self, w):
+        """RMS energy envelope → cough start/end sample indices."""
+        frame = self.sr // 100          # 10 ms frames
+        hop   = frame // 2
+        T     = w.size(-1)
+        n_frames = (T - frame) // hop + 1
+        if n_frames <= 0:
+            return 0, T
+        rms = w.squeeze(0).unfold(0, frame, hop).pow(2).mean(-1).sqrt()
+        thr = rms.max() * 0.08
+        active = (rms > thr).nonzero(as_tuple=True)[0]
+        if len(active) == 0:
+            return 0, T
+        return int(active[0].item() * hop), min(T, int(active[-1].item() * hop + frame))
+
+    def _phase_mel(self, seg):
+        """Convert a 1-D segment tensor → log-mel (1, n_mels, phase_frames)."""
+        if seg.size(-1) < 64:
+            seg = F.pad(seg, (0, 64 - seg.size(-1)))
+        mel = self.mel_tf(seg.unsqueeze(0))   # (1, n_mels, frames)
+        mel = torch.log(mel.clamp(min=1e-6))
+        # Resize time axis to phase_frames
+        mel = F.interpolate(
+            mel.unsqueeze(0),
+            size=(self.n_mels, self.phase_frames),
+            mode='bilinear', align_corners=False).squeeze(0)
+        return mel.unsqueeze(0)               # (1, 1, n_mels, phase_frames)
+
+    def forward(self, waveform):
+        """
+        waveform: (B, 1, T)
+        Returns:  list of 3 tensors each (B, 1, n_mels, phase_frames)
+        """
+        B = waveform.size(0)
+        phases = [[] for _ in range(3)]
+        for b in range(B):
+            w   = waveform[b, 0]                 # (T,)
+            s, e = self._detect_boundaries(w)
+            seg = w[s:e]
+            L   = seg.size(0)
+            # Phase boundaries
+            b0 = int(L * self.fracs[0])
+            b1 = int(L * (self.fracs[0] + self.fracs[1]))
+            segs = [seg[:b0], seg[b0:b1], seg[b1:]]
+            for ph_i, ph_seg in enumerate(segs):
+                phases[ph_i].append(self._phase_mel(ph_seg))
+        return [torch.cat(phases[i], dim=0) for i in range(3)]
+
+
+class SinglePhaseEncoder(nn.Module):
+    """Lightweight ViT-style encoder for one cough phase."""
+    def __init__(self, n_mels=64, phase_frames=64, patch_size=8,
+                 dim=64, nhead=2, depth=2, dropout=0.1):
+        super().__init__()
+        assert n_mels % patch_size == 0 and phase_frames % patch_size == 0
+        n_patches     = (n_mels // patch_size) * (phase_frames // patch_size)
+        patch_dim     = patch_size * patch_size
+        self.patch_size = patch_size
+        self.proj       = nn.Linear(patch_dim, dim)
+        self.cls_token  = nn.Parameter(torch.zeros(1, 1, dim))
+        self.pos_embed  = nn.Parameter(torch.randn(1, n_patches + 1, dim) * 0.02)
+        self.transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=dim, nhead=nhead,
+                                       dim_feedforward=dim * 4, dropout=dropout,
+                                       batch_first=True, norm_first=True),
+            num_layers=depth)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, mel):
+        # mel: (B, 1, n_mels, phase_frames)
+        B  = mel.size(0)
+        ps = self.patch_size
+        x  = mel.squeeze(1)                                  # (B, H, W)
+        # Extract patches via unfold
+        x = x.unfold(1, ps, ps).unfold(2, ps, ps)           # (B, nh, nw, ps, ps)
+        _, nh, nw, _, _ = x.shape
+        x = x.reshape(B, nh * nw, ps * ps)                  # (B, n_patches, patch_dim)
+        x = self.proj(x)                                     # (B, n_patches, dim)
+        cls = self.cls_token.expand(B, -1, -1)
+        x   = torch.cat([cls, x], dim=1) + self.pos_embed   # (B, n+1, dim)
+        x   = self.transformer(x)
+        return self.norm(x[:, 0])                            # (B, dim) — CLS token
+
+
+class PhaseAwareEncoder(nn.Module):
+    """
+    Three independent SinglePhaseEncoders (one per cough phase).
+    CLS tokens concatenated → (B, 3*dim) phase embedding.
+    Appended to the main fusion embedding before the disease head.
+
+    dim=64 × 3 phases = 192-dim phase representation.
+    Combined with 256-dim fusion → 448-dim disease head input.
+    """
+    def __init__(self, n_mels=64, phase_frames=64, patch_size=8,
+                 dim=64, nhead=2, depth=2, dropout=0.1):
+        super().__init__()
+        self.encoders = nn.ModuleList([
+            SinglePhaseEncoder(n_mels, phase_frames, patch_size, dim, nhead, depth, dropout)
+            for _ in range(3)
+        ])
+        self.out_dim = dim * 3   # 192
+
+    def forward(self, phase_mels):
+        """phase_mels: list of 3 tensors (B, 1, n_mels, phase_frames)"""
+        return torch.cat([enc(pm) for enc, pm in zip(self.encoders, phase_mels)], dim=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11b. Demographic Adversarial Head (V3 — Novel Contribution)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DemographicAdversarialHead(nn.Module):
+    """
+    Multi-task gradient-reversal head that adversarially removes
+    age and gender information from the shared feature space.
+
+    Motivation: Islam et al. (2025) showed cross-dataset cough models
+    inflate AUC by learning demographic proxies (age, gender) which
+    correlate with disease labels across datasets, not disease signal.
+
+    This is the first system to simultaneously decorrelate:
+      (a) dataset domain (Coswara vs CoughVID) via GRL-domain
+      (b) age and gender demographics via GRL-demo
+
+    Age groups:  0→[<21], 1→[21-40], 2→[41-60], 3→[60+]
+    Gender:      0→male,  1→female
+    Unknown demographics (CoughVID samples) use label=-1,
+    masked by CrossEntropyLoss(ignore_index=-1).
+    """
+    def __init__(self, feat_dim=256, n_age_groups=4, n_genders=2):
+        super().__init__()
+        self.age_head = nn.Sequential(
+            nn.Linear(feat_dim, 64), nn.GELU(), nn.Dropout(0.2),
+            nn.Linear(64, n_age_groups))
+        self.gender_head = nn.Sequential(
+            nn.Linear(feat_dim, 64), nn.GELU(), nn.Dropout(0.2),
+            nn.Linear(64, n_genders))
+
+    def forward(self, features, lambda_demo=1.0):
+        rev = grad_reverse(features, lambda_demo)
+        return self.age_head(rev), self.gender_head(rev)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. Temperature Scaling Calibration
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TemperatureScaling(nn.Module):
@@ -537,27 +721,31 @@ class TemperatureScaling(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12. Full CoughSense V2 Model
+# 13. Full CoughSense V3 Model
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CoughSense(nn.Module):
     """
-    CoughSense V2.
+    CoughSense V3: Phase-Aware Multi-Adversarial Dual-Branch Architecture.
 
     Forward:
-      waveform : (B, 1, T)  mono 16kHz
-      lambda_d : float      GRL scale (DANN annealing)
+      waveform    : (B, 1, T)  mono 16kHz
+      lambda_d    : float      domain GRL scale (DANN annealing 0→1)
+      lambda_demo : float      demographic GRL scale (same schedule)
 
     Returns dict:
-      logits, domain_logits, embeddings, cnn_feat, tf_feat
+      logits, domain_logits, embeddings, cnn_feat, tf_feat,
+      age_logits, gender_logits, phase_emb (if use_phase_encoder)
     """
     def __init__(self, num_classes=3, num_domains=2,
                  embed_dim=256, sample_rate=16000, target_frames=128,
-                 bank_size=256, mc_samples=10):
+                 bank_size=256, mc_samples=10, use_phase_encoder=True):
         super().__init__()
-        self.mc_samples    = mc_samples
-        self.num_classes   = num_classes
+        self.mc_samples        = mc_samples
+        self.num_classes       = num_classes
+        self.use_phase_encoder = use_phase_encoder
 
+        # ── Shared backbone ───────────────────────────────────────────
         self.mel_extractor = MultiScaleMelExtractor(sample_rate, target_frames)
         self.cnn_branch    = CNNBranch(in_ch=3, embed_dim=embed_dim)
         self.tf_branch     = TransformerBranch(
@@ -565,30 +753,64 @@ class CoughSense(nn.Module):
                                 ph=8, pw=8, dim=128, nhead=4, depth=4,
                                 dropout=0.1, drop_path=0.1)
         self.fusion        = AttentionFusion(dim=embed_dim, out_dim=embed_dim)
-        self.domain_clf    = DomainClassifier(feat_dim=embed_dim, n_domains=num_domains)
-        self.disease_head  = nn.Sequential(
-            nn.Linear(embed_dim, 128), nn.GELU(),
-            nn.Dropout(0.3),           # kept ON during MC-Dropout inference
-            nn.Linear(128, num_classes))
-        self.memory_bank   = MomentumMemoryBank(embed_dim, bank_size, num_classes)
-        self.calibrator    = TemperatureScaling()
 
-    def forward(self, waveform, lambda_d=1.0):
-        mel         = self.mel_extractor(waveform)
-        cnn_feat    = self.cnn_branch(mel)
-        tf_feat     = self.tf_branch(mel)
-        fused       = self.fusion(cnn_feat, tf_feat)
-        embeddings  = F.normalize(fused, dim=1)
-        logits      = self.disease_head(fused)
+        # ── Adversarial heads ─────────────────────────────────────────
+        self.domain_clf  = DomainClassifier(feat_dim=embed_dim, n_domains=num_domains)
+        self.demo_head   = DemographicAdversarialHead(feat_dim=embed_dim)
+
+        # ── Phase-Aware Encoder (V3) ──────────────────────────────────
+        if use_phase_encoder:
+            self.phase_seg  = CoughPhaseSegmenter(sample_rate=sample_rate)
+            self.phase_enc  = PhaseAwareEncoder(
+                n_mels=64, phase_frames=64, patch_size=8,
+                dim=64, nhead=2, depth=2)
+            disease_in_dim  = embed_dim + self.phase_enc.out_dim  # 256+192=448
+        else:
+            self.phase_seg  = None
+            self.phase_enc  = None
+            disease_in_dim  = embed_dim
+
+        # ── Disease head (wider input in V3) ──────────────────────────
+        self.disease_head = nn.Sequential(
+            nn.Linear(disease_in_dim, 128), nn.GELU(),
+            nn.Dropout(0.3),               # kept ON during MC-Dropout
+            nn.Linear(128, num_classes))
+
+        self.memory_bank = MomentumMemoryBank(embed_dim, bank_size, num_classes)
+        self.calibrator  = TemperatureScaling()
+
+    def forward(self, waveform, lambda_d=1.0, lambda_demo=1.0):
+        # ── Main dual-branch ──────────────────────────────────────────
+        mel          = self.mel_extractor(waveform)
+        cnn_feat     = self.cnn_branch(mel)
+        tf_feat      = self.tf_branch(mel)
+        fused        = self.fusion(cnn_feat, tf_feat)
+        embeddings   = F.normalize(fused, dim=1)
+
+        # ── Phase encoding ────────────────────────────────────────────
+        if self.use_phase_encoder and self.phase_seg is not None:
+            phase_mels   = self.phase_seg(waveform)
+            phase_emb    = self.phase_enc(phase_mels)
+            disease_feat = torch.cat([fused, phase_emb], dim=1)
+        else:
+            phase_emb    = None
+            disease_feat = fused
+
+        # ── Task heads ────────────────────────────────────────────────
+        logits        = self.disease_head(disease_feat)
         domain_logits = self.domain_clf(fused, lambda_d)
+        age_logits, gender_logits = self.demo_head(fused, lambda_demo)
+
         return dict(logits=logits, domain_logits=domain_logits,
-                    embeddings=embeddings, cnn_feat=cnn_feat, tf_feat=tf_feat)
+                    embeddings=embeddings, cnn_feat=cnn_feat, tf_feat=tf_feat,
+                    age_logits=age_logits, gender_logits=gender_logits,
+                    phase_emb=phase_emb)
 
     @torch.no_grad()
     def predict(self, waveform):
         """Deterministic inference (no augmentation, no GRL)."""
         self.eval()
-        out = self.forward(waveform, lambda_d=0.0)
+        out = self.forward(waveform, lambda_d=0.0, lambda_demo=0.0)
         return F.softmax(out['logits'], dim=1)
 
     @torch.no_grad()
@@ -605,36 +827,41 @@ class CoughSense(nn.Module):
           raw_samples : (B, mc_samples, C)  individual samples for analysis
         """
         self.train()  # enable dropout
-        B = waveform.size(0)
         samples = []
         for _ in range(self.mc_samples):
-            out = self.forward(waveform, lambda_d=0.0)
+            out = self.forward(waveform, lambda_d=0.0, lambda_demo=0.0)
             cal = self.calibrator(out['logits'])
             samples.append(F.softmax(cal, dim=1))
         self.eval()
 
-        raw    = torch.stack(samples, dim=1)          # (B, S, C)
-        mean_p = raw.mean(dim=1)                      # (B, C)
-        entropy = -(mean_p * (mean_p + 1e-8).log()).sum(dim=1)  # (B,)
+        raw     = torch.stack(samples, dim=1)                        # (B, S, C)
+        mean_p  = raw.mean(dim=1)                                    # (B, C)
+        entropy = -(mean_p * (mean_p + 1e-8).log()).sum(dim=1)       # (B,)
         return mean_p, entropy, raw
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13. Combined Loss (V2)
+# 14. Combined Loss (V3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CoughSenseLoss(nn.Module):
     """
-    V2 combined loss:
+    V3 combined loss:
 
-    L_total = L_focal + α·L_supcon - λ_d·L_domain + β·L_distill
+    L_total = L_focal + α·L_supcon
+              − λ_d   · L_domain
+              − λ_demo · (L_age + L_gender)
+              + β·L_distill
 
-    L_focal   : focal loss for disease classification
-    L_supcon  : CBS-SupCon with memory bank
-    L_domain  : adversarial domain loss (subtracted)
-    L_distill : KL(student || EMA teacher) — self-distillation
+    L_focal          : focal loss for disease classification
+    L_supcon         : CBS-SupCon with momentum memory bank
+    L_domain         : adversarial dataset-domain loss (subtracted via GRL)
+    L_age, L_gender  : adversarial demographic losses (subtracted via GRL)
+    L_distill        : KL(student || EMA teacher) — self-distillation
 
-    Weights (α, λ_d, β) are optionally managed by GradNorm (see trainer).
+    Weights (α, λ_d, λ_demo, β) optionally managed by GradNorm.
+    Demographic labels use ignore_index=-1 for CoughVID samples
+    (no age/gender metadata available for that dataset).
     """
     def __init__(self, alpha=0.3, beta=0.1, memory_bank=None,
                  focal_gamma=2.0, label_smoothing=0.1):
@@ -644,17 +871,35 @@ class CoughSenseLoss(nn.Module):
         self.focal       = FocalLoss(gamma=focal_gamma,
                                      label_smoothing=label_smoothing)
         self.domain_loss = nn.CrossEntropyLoss()
+        self.demo_ce     = nn.CrossEntropyLoss(ignore_index=-1)
         self.supcon      = ClassBalancedSupConLoss(memory_bank=memory_bank)
 
+    def demographic_loss(self, outputs, age_labels, gender_labels):
+        """Cross-entropy for age + gender (−1 labels masked via ignore_index)."""
+        l_age    = self.demo_ce(outputs['age_logits'],    age_labels)
+        l_gender = self.demo_ce(outputs['gender_logits'], gender_labels)
+        return l_age + l_gender
+
     def forward(self, outputs, disease_labels, domain_labels,
-                lambda_d=1.0, teacher_probs=None):
-        l_focal  = self.focal(outputs['logits'], disease_labels)
-        l_domain = self.domain_loss(outputs['domain_logits'], domain_labels)
-        l_supcon = self.supcon(outputs['embeddings'], disease_labels)
+                lambda_d=1.0, lambda_demo=1.0,
+                teacher_probs=None,
+                age_labels=None, gender_labels=None):
+        device    = outputs['logits'].device
+        l_focal   = self.focal(outputs['logits'], disease_labels)
+        l_domain  = self.domain_loss(outputs['domain_logits'], domain_labels)
+        l_supcon  = self.supcon(outputs['embeddings'], disease_labels)
 
-        total = l_focal + self.alpha * l_supcon - lambda_d * l_domain
+        # Demographic adversarial loss (0 if labels unavailable)
+        l_demo = torch.tensor(0.0, device=device)
+        if age_labels is not None and gender_labels is not None:
+            l_demo = self.demographic_loss(outputs, age_labels, gender_labels)
 
-        l_distill = torch.tensor(0.0, device=l_focal.device)
+        total = (l_focal
+                 + self.alpha * l_supcon
+                 - lambda_d   * l_domain
+                 - lambda_demo * l_demo)
+
+        l_distill = torch.tensor(0.0, device=device)
         if teacher_probs is not None and self.beta > 0:
             student_log = F.log_softmax(outputs['logits'], dim=1)
             l_distill   = F.kl_div(student_log, teacher_probs,
@@ -665,6 +910,7 @@ class CoughSenseLoss(nn.Module):
                     focal=l_focal.item(),
                     supcon=l_supcon.item(),
                     domain=l_domain.item(),
+                    demo=l_demo.item() if isinstance(l_demo, torch.Tensor) else l_demo,
                     distill=l_distill.item())
 
 
@@ -852,29 +1098,39 @@ def get_lambda_schedule(epoch, total_epochs, gamma=10.0):
 
 
 def build_model(num_classes=3, num_domains=2, sample_rate=16000,
-                target_frames=128, bank_size=256):
+                target_frames=128, bank_size=256, use_phase_encoder=True):
     return CoughSense(num_classes=num_classes, num_domains=num_domains,
                       embed_dim=256, sample_rate=sample_rate,
-                      target_frames=target_frames, bank_size=bank_size)
+                      target_frames=target_frames, bank_size=bank_size,
+                      use_phase_encoder=use_phase_encoder)
 
 
 if __name__ == '__main__':
-    import random
-    model = build_model()
+    model = build_model(num_classes=2)
     count_parameters(model)
 
     wave = torch.randn(4, 1, 56000)
-    out  = model(wave, lambda_d=0.5)
+    out  = model(wave, lambda_d=0.5, lambda_demo=0.5)
     print("logits:       ", out['logits'].shape)
     print("domain_logits:", out['domain_logits'].shape)
     print("embeddings:   ", out['embeddings'].shape)
+    print("age_logits:   ", out['age_logits'].shape)
+    print("gender_logits:", out['gender_logits'].shape)
+    if out['phase_emb'] is not None:
+        print("phase_emb:    ", out['phase_emb'].shape)
 
     criterion = CoughSenseLoss(memory_bank=model.memory_bank)
-    dlabels   = torch.tensor([0, 1, 2, 0])
+    dlabels   = torch.tensor([0, 1, 0, 1])
     domains   = torch.tensor([0, 0, 1, 1])
-    teacher_p = torch.softmax(torch.randn(4, 3), dim=1)
-    losses    = criterion(out, dlabels, domains, lambda_d=0.5, teacher_probs=teacher_p)
-    print("losses:", {k: round(v, 4) if isinstance(v, float) else v for k, v in losses.items()})
+    age_lbl   = torch.tensor([1, 2, -1, -1])   # CoughVID = -1 (unknown)
+    gender_lbl= torch.tensor([0, 1, -1, -1])
+    teacher_p = torch.softmax(torch.randn(4, 2), dim=1)
+    losses    = criterion(out, dlabels, domains,
+                          lambda_d=0.5, lambda_demo=0.5,
+                          teacher_probs=teacher_p,
+                          age_labels=age_lbl, gender_labels=gender_lbl)
+    print("losses:", {k: round(float(v), 4) if hasattr(v, 'item') else round(v, 4)
+                      for k, v in losses.items() if k != 'total'})
 
     # MC Dropout uncertainty
     mean_p, unc, raw = model.predict_with_uncertainty(wave)
@@ -882,10 +1138,11 @@ if __name__ == '__main__':
 
     # PCGrad test
     pcgrad = PCGrad(torch.optim.AdamW(model.parameters(), lr=1e-3))
-    out2   = model(wave, lambda_d=0.3)
+    out2   = model(wave, lambda_d=0.3, lambda_demo=0.3)
     l_cls  = criterion.focal(out2['logits'], dlabels)
     l_dom  = criterion.domain_loss(out2['domain_logits'], domains)
-    pcgrad.pc_backward([l_cls, l_dom])
+    l_demo = criterion.demographic_loss(out2, age_lbl, gender_lbl)
+    pcgrad.pc_backward([l_cls, l_dom, l_demo])
     pcgrad.step()
 
-    print("\nAll V2 checks passed.")
+    print("\nAll V3 checks passed.")
