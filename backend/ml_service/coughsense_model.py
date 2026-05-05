@@ -563,8 +563,10 @@ class CoughPhaseSegmenter(nn.Module):
 
     def _phase_mel(self, seg):
         """Convert a 1-D segment tensor → log-mel (1, n_mels, phase_frames)."""
-        if seg.size(-1) < 64:
-            seg = F.pad(seg, (0, 64 - seg.size(-1)))
+        # Must be at least n_fft samples long for STFT; pad generously
+        min_len = 1024
+        if seg.size(-1) < min_len:
+            seg = F.pad(seg, (0, min_len - seg.size(-1)))
         mel = self.mel_tf(seg.unsqueeze(0))   # (1, n_mels, frames)
         mel = torch.log(mel.clamp(min=1e-6))
         # Resize time axis to phase_frames
