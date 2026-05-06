@@ -8,6 +8,8 @@
     "start": "node src/server.js",
     "train": "python3 training/train_coswara.py",
     "train:coughsense": "python3 ml_service/train_coughsense.py --use_csv --csv_path ml_service/local_data.csv",
+    "train:v4": "python3 -u ml_service/train_v4.py --csv ml_service/full_data.csv --output_dir checkpoints_v4 --epochs 60 --batch_size 16 --folds 5",
+    "build:dataset": "python3 ml_service/build_full_dataset.py",
     "setup:data": "python3 ml_service/setup_data.py",
     "ml": "python3 ml_service/coughsense_service.py"
   },
