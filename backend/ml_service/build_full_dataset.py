@@ -23,7 +23,7 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TRANSFERS    = ['TRANSFER', 'TRANSFER 2', 'TRANSFER 3', 'TRANSFER 4']
-BASE_ROOT    = Path.home() / 'Downloads'
+BASE_ROOT    = Path(os.environ.get('COSWARA_ROOT', Path.home() / 'Downloads'))
 LABEL_MAP    = {
     'healthy':          'healthy',
     'positive_mild':    'covid',
