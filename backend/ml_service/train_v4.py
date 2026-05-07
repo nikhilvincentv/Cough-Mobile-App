@@ -51,6 +51,13 @@ CLASS_NAMES   = ['healthy', 'covid']
 SYMPTOM_COLS  = ['sym_fever','sym_cold','sym_cough',
                  'sym_diarrhoea','sym_loss_of_smell','sym_ftg','sym_st']
 
+# SpecAugment parameters
+SPECAUG_FREQ_MASKS  = 2
+SPECAUG_FREQ_WIDTH  = 12
+SPECAUG_TIME_MASKS  = 2
+SPECAUG_TIME_WIDTH  = 20
+SPECAUG_PROB        = 0.8
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Audio helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,15 +93,14 @@ def wav_to_mel(w: torch.Tensor, training: bool = False) -> torch.Tensor:
     mu, sigma = spec.mean(), spec.std() + 1e-8
     spec = (spec - mu) / sigma
 
-    if training:
-        # SpecAugment: 2 freq masks + 2 time masks
+    if training and random.random() < SPECAUG_PROB:
         _, F_bins, T_bins = spec.shape
-        for _ in range(2):
-            f0 = random.randint(0, max(0, F_bins - 12))
-            spec[0, f0:f0 + random.randint(1, 12), :] = 0
-        for _ in range(2):
-            t0 = random.randint(0, max(0, T_bins - 20))
-            spec[0, :, t0:t0 + random.randint(1, 20)] = 0
+        for _ in range(SPECAUG_FREQ_MASKS):
+            f0 = random.randint(0, max(0, F_bins - SPECAUG_FREQ_WIDTH))
+            spec[0, f0:f0 + random.randint(1, SPECAUG_FREQ_WIDTH), :] = 0
+        for _ in range(SPECAUG_TIME_MASKS):
+            t0 = random.randint(0, max(0, T_bins - SPECAUG_TIME_WIDTH))
+            spec[0, :, t0:t0 + random.randint(1, SPECAUG_TIME_WIDTH)] = 0
     return spec
 
 # ─────────────────────────────────────────────────────────────────────────────
