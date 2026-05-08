@@ -573,6 +573,11 @@ def main():
     log.write(fin + '\n')
     log.close()
 
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable    = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"\nModel params: {total_params:,} total, {trainable:,} trainable "
+          f"({trainable/1e6:.2f}M)")
+
 
 if __name__ == '__main__':
     main()
