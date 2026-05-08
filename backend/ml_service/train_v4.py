@@ -464,7 +464,12 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    if torch.cuda.is_available():
+        device = 'cuda'
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
     print(f"Device: {device}")
 
     out_dir = Path(args.output_dir)
