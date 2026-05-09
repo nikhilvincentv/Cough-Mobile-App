@@ -164,10 +164,10 @@ class CNN2Class(nn.Module):
 
 def load_models():
     """Load trained PyTorch models"""
-    print("🔄 Loading models...")
-    print(f"Looking for models in: {MODEL_DIR}")
-    print(f"Cough model path: {COUGH_MODEL_PATH}")
-    print(f"Coswara model path: {COSWARA_MODEL_PATH}")
+    print("Loading models...")
+    print(f"Model dir: {MODEL_DIR}")
+    print(f"Cough model: {COUGH_MODEL_PATH}")
+    print(f"Coswara model: {COSWARA_MODEL_PATH}")
     
     # Prioritize 'cnn.pth' if it exists, otherwise check for 'coswara_cnn.pth'
     USER_MODEL_PATH = MODEL_DIR / 'cnn.pth'
