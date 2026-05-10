@@ -451,13 +451,16 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch, total_ep
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--csv',        default='ml_service/full_data.csv')
-    p.add_argument('--output_dir', default='checkpoints_v4')
-    p.add_argument('--epochs',     type=int,   default=60)
-    p.add_argument('--batch_size', type=int,   default=16)
-    p.add_argument('--lr',         type=float, default=3e-4)
-    p.add_argument('--folds',      type=int,   default=5)
-    p.add_argument('--seed',       type=int,   default=42)
+    p.add_argument('--csv',           default='ml_service/full_data.csv')
+    p.add_argument('--output_dir',    default='checkpoints_v4')
+    p.add_argument('--epochs',        type=int,   default=60)
+    p.add_argument('--batch_size',    type=int,   default=16)
+    p.add_argument('--lr',            type=float, default=3e-4)
+    p.add_argument('--folds',         type=int,   default=5)
+    p.add_argument('--seed',          type=int,   default=42)
+    p.add_argument('--patience',      type=int,   default=15,
+                   help='early stopping patience (epochs without F1 improvement)')
+    p.add_argument('--grad_clip',     type=float, default=1.0)
     args = p.parse_args()
 
     random.seed(args.seed)
