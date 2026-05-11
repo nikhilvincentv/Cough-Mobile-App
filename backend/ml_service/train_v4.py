@@ -202,8 +202,6 @@ class ResBlock(nn.Module):
         self.act  = nn.GELU()
 
     def forward(self, x):
-        return self.act(self.conv(x) * self.se(self.conv(x)).sigmoid() + self.skip(x))
-
     def forward(self, x):
         h = self.conv(x)
         h = h * self.se(h)
