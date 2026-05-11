@@ -147,6 +147,7 @@ class CoughDatasetV4(Dataset):
 
 def load_csv(csv_path: str) -> list:
     samples = []
+    missing_audio = 0
     with open(csv_path) as f:
         for row in csv.DictReader(f):
             disease = row.get('disease', '').strip().lower()
@@ -154,6 +155,7 @@ def load_csv(csv_path: str) -> list:
                 continue
             path_h = row.get('audio_path', '').strip()
             if not path_h or not Path(path_h).exists():
+                missing_audio += 1
                 continue
             symptoms = [int(row.get(c, 0) or 0) for c in SYMPTOM_COLS]
             samples.append({
@@ -164,6 +166,8 @@ def load_csv(csv_path: str) -> list:
                 'age':          row.get('age', ''),
                 'gender':       row.get('gender', ''),
             })
+    if missing_audio:
+        print(f"  Warning: skipped {missing_audio} rows with missing audio files")
     return samples
 
 # ─────────────────────────────────────────────────────────────────────────────
