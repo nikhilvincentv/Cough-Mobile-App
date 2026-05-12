@@ -1,15 +1,17 @@
-# Cough AI - Respiratory Disease Detection
+# CoughSense — Respiratory Disease Detection
 
-This project uses deep learning to detect respiratory diseases from audio recordings of coughs. It is currently a proof-of-concept with a balanced accuracy of 64.4% across all classes.
+CoughSense is a deep learning system that detects respiratory disease from smartphone cough recordings. The V4 model achieves **88.6% balanced accuracy** (AUC 0.908) on 2,046 PCR-labeled Coswara patients in 5-fold cross-validation.
 
-## What it does
+## Model Performance (V4)
 
-The system analyzes cough audio to detect three possible states:
-* Healthy (59.9% accuracy)
-* COVID-19 (64.2% accuracy)
-* Bronchitis (67.1% accuracy)
+| Metric | Score |
+|--------|-------|
+| Balanced Accuracy | **88.6% ± 0.9%** |
+| Macro-AUC | **0.908** |
+| Macro-F1 | **0.883** |
+| ECE (calibrated) | **0.07** |
 
-Overall, the model averages 64.4% accuracy across these three categories.
+Benchmarked on 2,046 Coswara patients (1,389 healthy, 657 PCR-confirmed COVID-19).
 
 ## Quick start
 
