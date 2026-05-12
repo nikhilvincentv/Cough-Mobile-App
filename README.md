@@ -51,6 +51,15 @@ For more detailed setup instructions, check out RUN_SYSTEM.md.
 
 The project consists of a React Native (Expo) mobile app that communicates over HTTPS/JWT with an Express.js backend. The backend handles authentication via Clerk, rate limiting via Redis, and passes audio data to our ML models and OpenAI for analysis.
 
+```
+mobile (React Native/Expo)
+    └─► backend/api (Express.js)
+            ├─► backend/ml_service (Flask + PyTorch)
+            │       └─► CoughSense V4 — 2.74M params, 128ms CPU inference
+            ├─► Clerk (auth)
+            └─► Upstash Redis (rate limiting)
+```
+
 ## Documentation
 
 * RUN_SYSTEM.md: Instructions for getting the whole system up and running.
